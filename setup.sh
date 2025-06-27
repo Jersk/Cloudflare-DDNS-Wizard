@@ -273,6 +273,60 @@ License: MIT"
     touch "$UTILS_DIR/.onboarding_complete"
 }
 
+# -- Wrapper Functions for TUI onboarding steps --
+configure_api_token_tui() {
+    if [[ $HAS_WHIPTAIL == true ]]; then
+        local new_token
+        while true; do
+            new_token=$(whiptail --title "Cloudflare API Token" --passwordbox "Enter your API token" 10 70 3>&1 1>&2 2>&3)
+            local exit_status=$?
+            [[ $exit_status -ne 0 ]] && return 1
+            if [[ -n "$new_token" && ${#new_token} -gt 10 ]]; then
+                if save_api_token "$new_token"; then
+                    return 0
+                else
+                    local result=$?
+                    if [[ $result -eq 2 ]]; then
+                        if whiptail --title "Invalid Token" --yesno "Token appears invalid. Keep it anyway?" 10 60; then
+                            print_warning "Invalid token saved. You'll need to fix it later."
+                            return 0
+                        else
+                            [[ -f "${API_TOKEN_FILE}.bak" ]] && mv "${API_TOKEN_FILE}.bak" "$API_TOKEN_FILE" || rm -f "$API_TOKEN_FILE"
+                        fi
+                    fi
+                fi
+            fi
+            whiptail --title "Invalid Input" --msgbox "Please enter a valid API token." 8 60
+        done
+    else
+        update_api_token
+    fi
+}
+
+configure_domain_settings_tui() {
+    if [[ $HAS_WHIPTAIL == true ]]; then
+        configure_domain_settings
+    else
+        configure_domain_settings
+    fi
+}
+
+configure_service_tui() {
+    manage_service
+}
+
+show_completion_summary_tui() {
+    if [[ $HAS_WHIPTAIL == true ]]; then
+        whiptail --title "Setup Complete" --msgbox "Cloudflare DDNS Wizard setup is complete!" 10 60
+    else
+        print_info "=========================================="
+        print_info "🎉 ONBOARDING COMPLETE"
+        print_info "=========================================="
+        show_configuration_summary
+        print_info "Use this script to manage the service and view logs."
+    fi
+}
+
 # --- Domain and DNS Record Configuration ---
 configure_domain_settings() {
     load_saved_selections
@@ -1815,80 +1869,75 @@ update_api_token() {
         if [[ "$new_token" == "0" ]]; then
             print_info "Token update cancelled."
             return 1
-        elif [[ -n "$new_token" && ${#new_token} -gt 10 ]]; then
-            # Backup old token
-            [[ -f "$API_TOKEN_FILE" ]] && cp "$API_TOKEN_FILE" "${API_TOKEN_FILE}.bak" 2>/dev/null
-            
-            # Determine the correct user for ownership
-            local target_user target_group
-            if [[ -n "${SUDO_USER:-}" ]]; then
-                # Script was run with sudo, use the original user
-                target_user="$SUDO_USER"
-                target_group="$SUDO_USER"
-                print_info "Detected sudo execution, setting ownership to: $target_user"
-            else
-                # Script run directly by user
-                target_user="$USER"
-                target_group="$USER"
-                print_info "Setting ownership to current user: $target_user"
-            fi
-            
-            # Create directory structure with correct ownership
-            mkdir -p "$UTILS_DIR"
-            if [[ "$EUID" -eq 0 ]]; then
-                # Running as root, set proper ownership
-                chown "$target_user:$target_group" "$UTILS_DIR" 2>/dev/null || true
-            fi
-            chmod 755 "$UTILS_DIR"
-            
-            # Save token - be very careful about whitespace
-            printf '%s' "$new_token" > "$API_TOKEN_FILE"
-            
-            # Set permissions and ownership
-            chmod 600 "$API_TOKEN_FILE"
-            if [[ "$EUID" -eq 0 ]]; then
-                # Running as root, set proper ownership
-                chown "$target_user:$target_group" "$API_TOKEN_FILE" 2>/dev/null || true
-            fi
-            
-            # Verify the token was saved correctly
-            local saved_token_length
-            if [[ -f "$API_TOKEN_FILE" ]]; then
-                saved_token_length=$(wc -c < "$API_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
-                print_info "Token saved successfully:"
-                print_info "  File: $API_TOKEN_FILE"
-                print_info "  Length: $saved_token_length characters"
-                print_info "  Permissions: $(ls -la "$API_TOKEN_FILE" 2>/dev/null | awk '{print $1, $3, $4}' || echo 'Failed to check')"
-            else
-                print_error "Failed to save token file"
-                return 1
-            fi
-            
-            # Test new token
-            if test_api_connectivity; then
-                print_success "✅ New API token is valid and saved!"
-                return 0
-            else
-                print_error "❌ New token is invalid."
-                read -p "Keep it anyway? (y/N): " keep_invalid
-                if [[ "$keep_invalid" =~ ^[Yy]$ ]]; then
-                    print_warning "Invalid token saved. You'll need to fix it later."
-                    return 0
-                else
-                    # Restore backup if available
-                    if [[ -f "${API_TOKEN_FILE}.bak" ]]; then
-                        mv "${API_TOKEN_FILE}.bak" "$API_TOKEN_FILE"
-                        print_info "Previous token restored."
-                    else
-                        rm -f "$API_TOKEN_FILE"
-                        print_info "Token removed."
-                    fi
-                fi
-            fi
+        fi
+
+        if save_api_token "$new_token"; then
+            return 0
         else
-            print_error "Invalid token. Please enter a valid Cloudflare API token."
+            case $? in
+                2)
+                    read -p "Keep it anyway? (y/N): " keep_invalid
+                    if [[ "$keep_invalid" =~ ^[Yy]$ ]]; then
+                        print_warning "Invalid token saved. You'll need to fix it later."
+                        return 0
+                    else
+                        [[ -f "${API_TOKEN_FILE}.bak" ]] && mv "${API_TOKEN_FILE}.bak" "$API_TOKEN_FILE" || rm -f "$API_TOKEN_FILE"
+                    fi
+                    ;;
+                *)
+                    print_error "Invalid token. Please enter a valid Cloudflare API token."
+                    ;;
+            esac
         fi
     done
+}
+
+save_api_token() {
+    local new_token="$1"
+    [[ -z "$new_token" || ${#new_token} -le 10 ]] && return 1
+
+    [[ -f "$API_TOKEN_FILE" ]] && cp "$API_TOKEN_FILE" "${API_TOKEN_FILE}.bak" 2>/dev/null
+
+    local target_user target_group
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        target_user="$SUDO_USER"
+        target_group="$SUDO_USER"
+    else
+        target_user="$USER"
+        target_group="$USER"
+    fi
+
+    mkdir -p "$UTILS_DIR"
+    if [[ "$EUID" -eq 0 ]]; then
+        chown "$target_user:$target_group" "$UTILS_DIR" 2>/dev/null || true
+    fi
+    chmod 755 "$UTILS_DIR"
+
+    printf '%s' "$new_token" > "$API_TOKEN_FILE"
+    chmod 600 "$API_TOKEN_FILE"
+    if [[ "$EUID" -eq 0 ]]; then
+        chown "$target_user:$target_group" "$API_TOKEN_FILE" 2>/dev/null || true
+    fi
+
+    local saved_token_length
+    if [[ -f "$API_TOKEN_FILE" ]]; then
+        saved_token_length=$(wc -c < "$API_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
+        print_info "Token saved successfully:"
+        print_info "  File: $API_TOKEN_FILE"
+        print_info "  Length: $saved_token_length characters"
+        print_info "  Permissions: $(ls -la "$API_TOKEN_FILE" 2>/dev/null | awk '{print $1, $3, $4}' || echo 'Failed to check')"
+    else
+        print_error "Failed to save token file"
+        return 1
+    fi
+
+    if test_api_connectivity; then
+        print_success "✅ New API token is valid and saved!"
+        return 0
+    else
+        print_error "❌ New token is invalid."
+        return 2
+    fi
 }
 
 # --- View Current Configuration ---
